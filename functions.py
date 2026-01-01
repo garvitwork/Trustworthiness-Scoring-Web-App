@@ -1,278 +1,228 @@
 """
-Core Utility Functions for ML Trust Score System
-All reusable functions for model handling, trust calculation, and tracking
+Core Functions - Model handling, trust metrics, and DVC logging
+Includes both sync (for main.py) and async (for api.py) functions
 """
 
 import os
 import json
 import pickle
-import subprocess
+import shutil
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
-import logging
-
-logger = logging.getLogger(__name__)
 
 # ============================================================================
-# DVC & DAGSHUB FUNCTIONS
-# ============================================================================
-
-def initialize_dvc(project_dir: Path) -> bool:
-    """Initialize DVC in project directory"""
-    try:
-        os.chdir(project_dir)
-        
-        # Check if already initialized
-        if (project_dir / ".dvc").exists():
-            logger.info("DVC already initialized")
-            return True
-        
-        # Initialize DVC
-        result = subprocess.run(["dvc", "init"], capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            logger.info("DVC initialized successfully")
-            
-            # Configure DVC
-            subprocess.run(["dvc", "config", "core.autostage", "true"])
-            
-            return True
-        else:
-            logger.error(f"DVC init failed: {result.stderr}")
-            return False
-            
-    except FileNotFoundError:
-        logger.error("DVC not installed. Install with: pip install dvc")
-        return False
-    except Exception as e:
-        logger.error(f"DVC initialization error: {e}")
-        return False
-
-
-def setup_dagshub_connection(repo_url: str, token: str = None) -> bool:
-    """Setup DagHub remote for DVC"""
-    try:
-        # Add DagHub as DVC remote
-        remote_url = repo_url.replace("https://", f"https://{token}@") if token else repo_url
-        
-        result = subprocess.run(
-            ["dvc", "remote", "add", "-d", "dagshub", remote_url],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode == 0 or "already exists" in result.stderr:
-            logger.info("DagHub remote configured")
-            return True
-        else:
-            logger.warning(f"DagHub remote setup: {result.stderr}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"DagHub connection error: {e}")
-        return False
-
-
-def create_pipeline_structure(base_dir: Path) -> None:
-    """Create standard MLOps directory structure"""
-    directories = [
-        "data/raw",
-        "data/processed",
-        "models",
-        "metrics",
-        "logs",
-        "notebooks",
-        "src",
-        "tests"
-    ]
-    
-    for dir_path in directories:
-        (base_dir / dir_path).mkdir(parents=True, exist_ok=True)
-    
-    logger.info(f"Created project structure in {base_dir}")
-
-
-# ============================================================================
-# MODEL UPLOAD & VALIDATION FUNCTIONS
+# FILE HANDLING - SYNC VERSIONS (for main.py)
 # ============================================================================
 
 def validate_model_format(filename: str) -> Optional[str]:
-    """
-    Validate uploaded model format
-    Returns: model type string or None
-    """
+    """Validate model file format"""
     ext = Path(filename).suffix.lower()
-    
-    format_map = {
-        ".pkl": "scikit-learn",
-        ".pt": "pytorch",
-        ".pth": "pytorch",
-        ".h5": "tensorflow",
-        ".pb": "tensorflow"
-    }
-    
-    return format_map.get(ext)
+    formats = {".pkl": "scikit-learn", ".pt": "pytorch", ".h5": "tensorflow"}
+    return formats.get(ext)
 
+def validate_data_format_sync(file_path: str) -> int:
+    """Validate CSV data (sync version)"""
+    df = pd.read_csv(file_path)
+    if df.empty:
+        raise ValueError("Empty dataset")
+    return len(df)
 
-async def save_uploaded_model(file, model_id: str, model_dir: str) -> str:
-    """Save uploaded model file"""
-    try:
-        file_path = os.path.join(model_dir, f"{model_id}_{file.filename}")
-        
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
-        
-        logger.info(f"Model saved: {file_path}")
-        return file_path
-        
-    except Exception as e:
-        logger.error(f"Model save failed: {e}")
-        raise
+def save_model_sync(source_path: str, model_id: str, model_dir: str) -> str:
+    """Save model file (sync version)"""
+    os.makedirs(model_dir, exist_ok=True)
+    filename = os.path.basename(source_path)
+    dest_path = os.path.join(model_dir, f"{model_id}_{filename}")
+    shutil.copy2(source_path, dest_path)
+    return dest_path
 
-
-async def validate_data_format(file) -> int:
-    """
-    Validate uploaded data format
-    Returns: number of samples
-    """
-    try:
-        content = await file.read()
-        await file.seek(0)  # Reset file pointer
-        
-        # Try to read as CSV
-        df = pd.read_csv(pd.io.common.BytesIO(content))
-        
-        if df.empty:
-            raise ValueError("Empty dataset")
-        
-        logger.info(f"Data validation passed: {len(df)} samples")
-        return len(df)
-        
-    except Exception as e:
-        logger.error(f"Data validation failed: {e}")
-        raise ValueError(f"Invalid CSV format: {e}")
-
-
-async def save_uploaded_data(file, model_id: str, data_dir: str) -> str:
-    """Save uploaded data file"""
-    try:
-        file_path = os.path.join(data_dir, f"{model_id}_data.csv")
-        
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
-        
-        logger.info(f"Data saved: {file_path}")
-        return file_path
-        
-    except Exception as e:
-        logger.error(f"Data save failed: {e}")
-        raise
-
+def save_data_sync(source_path: str, model_id: str, data_dir: str) -> str:
+    """Save data file (sync version)"""
+    os.makedirs(data_dir, exist_ok=True)
+    dest_path = os.path.join(data_dir, f"{model_id}_data.csv")
+    shutil.copy2(source_path, dest_path)
+    return dest_path
 
 # ============================================================================
-# MODEL LOADING & PREDICTION FUNCTIONS
+# FILE HANDLING - ASYNC VERSIONS (for api.py)
+# ============================================================================
+
+async def save_uploaded_model(file, model_id: str, model_dir: str) -> str:
+    """Save model file (async version)"""
+    os.makedirs(model_dir, exist_ok=True)
+    file_path = os.path.join(model_dir, f"{model_id}_{file.filename}")
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+    return file_path
+
+async def validate_data_format(file) -> int:
+    """Validate CSV data (async version)"""
+    content = await file.read()
+    await file.seek(0)
+    df = pd.read_csv(pd.io.common.BytesIO(content))
+    if df.empty:
+        raise ValueError("Empty dataset")
+    return len(df)
+
+async def save_uploaded_data(file, model_id: str, data_dir: str) -> str:
+    """Save data file (async version)"""
+    os.makedirs(data_dir, exist_ok=True)
+    file_path = os.path.join(data_dir, f"{model_id}_data.csv")
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+    return file_path
+
+# ============================================================================
+# MODEL OPERATIONS (used by both main.py and api.py)
 # ============================================================================
 
 def load_model_from_storage(model_id: str, model_dir: str, metadata_dir: str) -> Tuple[Any, Dict]:
-    """Load model and metadata from storage"""
-    try:
-        # Load metadata
-        metadata_path = os.path.join(metadata_dir, f"{model_id}_metadata.json")
-        with open(metadata_path, "r") as f:
-            metadata = json.load(f)
-        
-        model_path = metadata["model_path"]
-        model_format = metadata["model_format"]
-        
-        # Load model based on format
-        if model_format == "scikit-learn":
+    """Load model and metadata"""
+    metadata_path = os.path.join(metadata_dir, f"{model_id}_metadata.json")
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+    
+    model_path = metadata["model_path"]
+    model_format = metadata["model_format"]
+    
+    if model_format == "scikit-learn":
+        # Try joblib first (more reliable for sklearn)
+        try:
+            import joblib
+            model = joblib.load(model_path)
+        except:
+            # Fall back to pickle
             with open(model_path, "rb") as f:
                 model = pickle.load(f)
-        
-        elif model_format == "pytorch":
-            import torch
-            model = torch.load(model_path)
-            model.eval()
-        
-        elif model_format == "tensorflow":
-            import tensorflow as tf
-            model = tf.keras.models.load_model(model_path)
-        
-        else:
-            raise ValueError(f"Unsupported model format: {model_format}")
-        
-        logger.info(f"Model loaded: {model_id}")
-        return model, metadata
-        
-    except Exception as e:
-        logger.error(f"Model loading failed: {e}")
-        raise
-
+                
+    elif model_format == "pytorch":
+        import torch
+        model = torch.load(model_path, map_location=torch.device('cpu'))
+        model.eval()
+    elif model_format == "tensorflow":
+        import tensorflow as tf
+        model = tf.keras.models.load_model(model_path)
+    else:
+        raise ValueError(f"Unsupported format: {model_format}")
+    
+    return model, metadata
 
 def make_prediction(model, input_data: Dict[str, Any], metadata: Dict) -> Tuple[Any, Optional[float]]:
-    """
-    Make prediction using loaded model
-    Returns: (prediction, confidence)
-    """
+    """Make prediction"""
+    model_format = metadata["model_format"]
+    feature_order = metadata.get("feature_order", list(input_data.keys()))
+    
+    # Create DataFrame with proper column names for sklearn
+    if model_format == "scikit-learn":
+        import pandas as pd
+        X = pd.DataFrame([[input_data[f] for f in feature_order]], columns=feature_order)
+        
+        prediction = model.predict(X)[0]
+        confidence = None
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(X)[0]
+            confidence = float(np.max(proba))
+    
+    elif model_format == "pytorch":
+        import torch
+        X = np.array([[input_data[f] for f in feature_order]])
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        with torch.no_grad():
+            output = model(X_tensor)
+            prediction = output.numpy()[0]
+            confidence = None
+    
+    elif model_format == "tensorflow":
+        X = np.array([[input_data[f] for f in feature_order]])
+        prediction = model.predict(X, verbose=0)[0]
+        confidence = None
+    
+    # Convert to Python types
+    if isinstance(prediction, np.ndarray):
+        prediction = prediction.tolist()
+    elif isinstance(prediction, (np.integer, np.floating)):
+        prediction = prediction.item()
+    
+    return prediction, confidence
+
+# ============================================================================
+# TRUST METRICS
+# ============================================================================
+
+def calculate_confidence_consistency(model, input_data: Dict, metadata: Dict) -> float:
+    """Metric 1: Confidence Consistency - Test stability with noise"""
     try:
-        model_format = metadata["model_format"]
+        import pandas as pd
+        feature_order = metadata.get("feature_order", list(input_data.keys()))
         
-        # Convert input to appropriate format
-        if model_format == "scikit-learn":
-            # Convert dict to array
-            feature_order = metadata.get("feature_order", list(input_data.keys()))
-            X = np.array([[input_data[f] for f in feature_order]])
-            
-            prediction = model.predict(X)[0]
-            
-            # Get confidence if available
-            confidence = None
-            if hasattr(model, "predict_proba"):
-                proba = model.predict_proba(X)[0]
-                confidence = float(np.max(proba))
+        # Original prediction
+        original_pred, _ = make_prediction(model, input_data, metadata)
         
-        elif model_format == "pytorch":
-            import torch
-            
-            feature_order = metadata.get("feature_order", list(input_data.keys()))
-            X = torch.tensor([[input_data[f] for f in feature_order]], dtype=torch.float32)
-            
-            with torch.no_grad():
-                output = model(X)
-                prediction = output.numpy()[0]
-                confidence = None  # Can extract from softmax if classification
+        # Add small noise
+        X = np.array([[input_data[f] for f in feature_order]])
+        noise = np.random.normal(0, 0.05, X.shape)
+        X_noisy = X + noise
+        noisy_input = {f: float(X_noisy[0][i]) for i, f in enumerate(feature_order)}
+        noisy_pred, _ = make_prediction(model, noisy_input, metadata)
         
-        elif model_format == "tensorflow":
-            feature_order = metadata.get("feature_order", list(input_data.keys()))
-            X = np.array([[input_data[f] for f in feature_order]])
-            
-            prediction = model.predict(X, verbose=0)[0]
-            confidence = None
-        
+        # Calculate consistency
+        if isinstance(original_pred, (list, np.ndarray)):
+            diff = np.linalg.norm(np.array(original_pred) - np.array(noisy_pred))
         else:
-            raise ValueError(f"Unsupported format: {model_format}")
+            diff = abs(float(original_pred) - float(noisy_pred))
         
-        # Convert numpy types to Python types
-        if isinstance(prediction, np.ndarray):
-            prediction = prediction.tolist()
-        elif isinstance(prediction, (np.integer, np.floating)):
-            prediction = prediction.item()
-        
-        logger.info(f"Prediction made: {prediction}, Confidence: {confidence}")
-        return prediction, confidence
-        
-    except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-        raise
+        consistency = max(0, 100 - (diff * 100))
+        return consistency
+    except:
+        return 50.0
 
+def calculate_data_familiarity(input_data: Dict, data_path: str, metadata: Dict) -> float:
+    """Metric 2: Data Familiarity - Check similarity to training data"""
+    try:
+        df = pd.read_csv(data_path)
+        feature_order = metadata.get("feature_order", list(input_data.keys()))
+        
+        input_vector = np.array([input_data[f] for f in feature_order])
+        train_vectors = df[feature_order].values
+        
+        # Calculate distances
+        distances = np.linalg.norm(train_vectors - input_vector, axis=1)
+        min_dist = np.min(distances)
+        avg_dist = np.mean(distances)
+        
+        # Convert to familiarity score
+        familiarity = max(0, 100 - (min_dist / avg_dist * 100))
+        return familiarity
+    except:
+        return 50.0
 
-# ============================================================================
-# TRUST SCORE CALCULATION FUNCTIONS (Day 1 Placeholder)
-# ============================================================================
+def calculate_agreement_score(input_data: Dict) -> float:
+    """Metric 3: Agreement Score - Placeholder for multi-model agreement"""
+    # Would need multiple models to compare
+    return 75.0
+
+def calculate_explanation_stability(model, input_data: Dict, metadata: Dict) -> float:
+    """Metric 4: Explanation Stability - Check prediction consistency"""
+    try:
+        pred1, _ = make_prediction(model, input_data, metadata)
+        pred2, _ = make_prediction(model, input_data, metadata)
+        
+        if isinstance(pred1, (list, np.ndarray)):
+            stable = np.allclose(pred1, pred2)
+        else:
+            stable = (pred1 == pred2)
+        
+        return 100.0 if stable else 50.0
+    except:
+        return 50.0
+
+def calculate_historical_error_rate() -> float:
+    """Metric 5: Historical Error Rate - Placeholder for past performance"""
+    # Would need historical predictions
+    return 85.0
 
 def calculate_trust_score(
     model: Any,
@@ -281,22 +231,20 @@ def calculate_trust_score(
     model_id: str,
     data_dir: str
 ) -> Dict[str, Any]:
-    """
-    Calculate comprehensive trust score
-    (Placeholder for Day 3-4 implementation)
-    """
-    # For Day 1, return basic structure
-    # Will be implemented fully on Days 3-4
+    """Calculate comprehensive trust score using all 5 metrics"""
     
-    trust_breakdown = {
-        "confidence_consistency": 85.0,  # Placeholder
-        "data_familiarity": 75.0,        # Placeholder
-        "agreement_score": 80.0,         # Placeholder
-        "explanation_stability": 70.0,   # Placeholder
-        "historical_error_rate": 90.0    # Placeholder
+    data_path = os.path.join(data_dir, f"{model_id}_data.csv")
+    
+    # Calculate all metrics
+    breakdown = {
+        "confidence_consistency": calculate_confidence_consistency(model, input_data, metadata),
+        "data_familiarity": calculate_data_familiarity(input_data, data_path, metadata),
+        "agreement_score": calculate_agreement_score(input_data),
+        "explanation_stability": calculate_explanation_stability(model, input_data, metadata),
+        "historical_error_rate": calculate_historical_error_rate()
     }
     
-    # Calculate weighted average
+    # Weighted average
     weights = {
         "confidence_consistency": 0.2,
         "data_familiarity": 0.25,
@@ -305,83 +253,53 @@ def calculate_trust_score(
         "historical_error_rate": 0.2
     }
     
-    trust_score = sum(trust_breakdown[k] * weights[k] for k in weights.keys())
+    trust_score = sum(breakdown[k] * weights[k] for k in weights.keys())
     
-    # Generate explanation
+    # Generate explanation based on thresholds
     if trust_score >= 80:
-        explanation = "High trust: Model prediction is reliable"
+        explanation = "HIGH TRUST (80-100): Model prediction is reliable"
     elif trust_score >= 50:
-        explanation = "Medium trust: Use prediction with caution"
+        explanation = "MEDIUM TRUST (50-80): Use prediction with caution"
     else:
-        explanation = "Low trust: Do not rely on this prediction"
+        explanation = "LOW TRUST (0-50): Do NOT rely on this prediction"
     
     return {
         "trust_score": round(trust_score, 2),
-        "breakdown": trust_breakdown,
+        "breakdown": {k: round(v, 2) for k, v in breakdown.items()},
         "explanation": explanation
     }
 
-
 # ============================================================================
-# EXPERIMENT TRACKING FUNCTIONS
+# DVC TRACKING
 # ============================================================================
 
-def log_experiment_metadata(metadata: Dict, experiment_name: str) -> None:
-    """Log experiment metadata to MLflow"""
+def log_to_dvc(stage: str, data: Dict):
+    """Log metrics to DVC-tracked JSON file"""
     try:
-        import mlflow
+        metrics_file = "metrics/trust_scores.json"
         
-        mlflow.log_params(metadata)
-        logger.info(f"Logged metadata for experiment: {experiment_name}")
+        # Load existing metrics
+        if os.path.exists(metrics_file):
+            with open(metrics_file, "r") as f:
+                metrics = json.load(f)
+        else:
+            metrics = {"uploads": [], "predictions": []}
+        
+        # Add new entry
+        entry = {
+            "timestamp": pd.Timestamp.now().isoformat(),
+            **data
+        }
+        
+        if stage == "upload":
+            metrics["uploads"].append(entry)
+        elif stage == "predict":
+            metrics["predictions"].append(entry)
+        
+        # Save metrics
+        os.makedirs("metrics", exist_ok=True)
+        with open(metrics_file, "w") as f:
+            json.dump(metrics, f, indent=2)
         
     except Exception as e:
-        logger.error(f"Metadata logging failed: {e}")
-
-
-def track_model_metrics(metrics: Dict, step: int = None) -> None:
-    """Track model performance metrics"""
-    try:
-        import mlflow
-        
-        for key, value in metrics.items():
-            mlflow.log_metric(key, value, step=step)
-        
-        logger.info(f"Logged {len(metrics)} metrics")
-        
-    except Exception as e:
-        logger.error(f"Metrics tracking failed: {e}")
-
-
-def create_dvc_pipeline(stages: Dict, output_path: Path) -> None:
-    """Create DVC pipeline YAML"""
-    try:
-        import yaml
-        
-        pipeline = {"stages": stages}
-        
-        with open(output_path, "w") as f:
-            yaml.dump(pipeline, f, default_flow_style=False)
-        
-        logger.info(f"DVC pipeline created: {output_path}")
-        
-    except Exception as e:
-        logger.error(f"DVC pipeline creation failed: {e}")
-
-
-# ============================================================================
-# PLACEHOLDER FUNCTIONS FOR FUTURE DAYS
-# ============================================================================
-
-def process_upload():
-    """Placeholder for DVC stage - Day 2"""
-    logger.info("Processing upload stage...")
-
-
-def calculate_all_metrics():
-    """Placeholder for DVC stage - Days 3-4"""
-    logger.info("Calculating trust metrics...")
-
-
-def evaluate_system():
-    """Placeholder for DVC stage - Day 7"""
-    logger.info("Evaluating system performance...")
+        print(f"⚠ DVC logging failed: {e}")

@@ -1,0 +1,19 @@
+{
+  "model_id": "model_20260101_151036",
+  "model_format": "scikit-learn",
+  "upload_timestamp": "2026-01-01T15:10:38.219334",
+  "model_path": "uploads/models\\model_20260101_151036_biased_regressor_model.pkl",
+  "data_path": "uploads/data\\model_20260101_151036_data.csv",
+  "data_samples": 10000,
+  "feature_order": [
+    "Unnamed: 0",
+    "age",
+    "gender",
+    "caste_category",
+    "region",
+    "income_bracket",
+    "health_score",
+    "access_to_hospital",
+    "treatment_priority"
+  ]
+}

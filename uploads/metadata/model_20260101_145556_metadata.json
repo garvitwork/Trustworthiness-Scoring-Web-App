@@ -1,0 +1,8 @@
+{
+  "model_id": "model_20260101_145556",
+  "model_format": "scikit-learn",
+  "upload_timestamp": "2026-01-01T14:55:58.600249",
+  "model_path": "uploads/models\\model_20260101_145556_biased_regressor_model.pkl",
+  "data_path": "uploads/data\\model_20260101_145556_data.csv",
+  "data_samples": 10000
+}
