@@ -12,5 +12,5 @@ dvc
 dagshub 
 mlflow 
 torch 
-tensorflow
 python-dotenv
+python-multipart
