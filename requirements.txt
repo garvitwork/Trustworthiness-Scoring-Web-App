@@ -1,0 +1,16 @@
+scikit-learn
+seaborn
+tensorflow
+requests
+flask
+fastapi
+uvicorn 
+pandas 
+numpy 
+pydantic 
+dvc 
+dagshub 
+mlflow 
+torch 
+tensorflow
+python-dotenv
