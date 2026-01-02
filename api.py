@@ -1,6 +1,6 @@
 """
 FastAPI Server for ML Trust Score System
-Deploy this to Render.com - WITH BATCH PROCESSING FOR LARGE DATASETS
+Deploy this to Render.com - WITH BATCH PROCESSING AND FIXED DAGSHUB TRACKING
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
@@ -52,43 +52,76 @@ for d in [MODEL_DIR, DATA_DIR, METADATA_DIR, JOBS_DIR]:
 # Job storage for async processing
 prediction_jobs = {}
 
-# Initialize MLflow with error handling
+# Initialize MLflow with FIXED DagHub authentication
 DAGSHUB_REPO = os.getenv("DAGSHUB_REPO", "garvitwork/ml-trust-score")
-DAGSHUB_TOKEN = os.getenv("DAGSHUB_TOKEN", "")
+DAGSHUB_TOKEN = os.getenv("DAGSHUB_TOKEN", "f43d18eaef53b8269dd37f6434a8612b4faa6c8b")
+DAGSHUB_USER = os.getenv("DAGSHUB_USER", "garvitwork")  # Add this to Render env vars
 MLFLOW_ENABLED = False
 
-try:
-    import mlflow
-    import dagshub
+def initialize_mlflow():
+    """Initialize MLflow with proper DagHub authentication"""
+    global MLFLOW_ENABLED
     
-    if DAGSHUB_TOKEN:
-        try:
-            dagshub.init(
-                repo_owner=DAGSHUB_REPO.split('/')[0],
-                repo_name=DAGSHUB_REPO.split('/')[1],
-                mlflow=True
-            )
-            mlflow.set_tracking_uri(f"https://dagshub.com/{DAGSHUB_REPO}.mlflow")
-            mlflow.set_experiment("ml-trust-score")
-            MLFLOW_ENABLED = True
-            print(f"✓ DagHub connected: {DAGSHUB_REPO}")
-        except Exception as e:
-            print(f"⚠ DagHub connection failed: {e}")
+    try:
+        import mlflow
+        import dagshub
+        
+        if DAGSHUB_TOKEN:
+            try:
+                # Set environment variables for authentication
+                os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USER
+                os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
+                
+                # Initialize DagHub
+                dagshub.init(
+                    repo_owner=DAGSHUB_REPO.split('/')[0],
+                    repo_name=DAGSHUB_REPO.split('/')[1],
+                    mlflow=True
+                )
+                
+                # Set tracking URI with authentication
+                tracking_uri = f"https://dagshub.com/{DAGSHUB_REPO}.mlflow"
+                mlflow.set_tracking_uri(tracking_uri)
+                mlflow.set_experiment("ml-trust-score")
+                
+                # Test connection with a dummy run
+                with mlflow.start_run(run_name="connection_test") as run:
+                    mlflow.log_param("test", "connection")
+                    mlflow.log_metric("status", 1)
+                
+                MLFLOW_ENABLED = True
+                print(f"✅ DagHub connected: {DAGSHUB_REPO}")
+                print(f"🔗 Tracking URI: {tracking_uri}")
+                return True
+                
+            except Exception as e:
+                print(f"⚠️ DagHub connection failed: {e}")
+                print(f"📋 Traceback: {traceback.format_exc()}")
+                
+                # Fallback to local MLflow
+                mlflow.set_tracking_uri("file://./mlruns")
+                MLFLOW_ENABLED = True
+                print("⚠️ Using local MLflow as fallback")
+                return False
+        else:
+            print("⚠️ DAGSHUB_TOKEN not found in environment")
             mlflow.set_tracking_uri("file://./mlruns")
             MLFLOW_ENABLED = True
-            print("⚠ Using local MLflow")
-    else:
-        mlflow.set_tracking_uri("file://./mlruns")
-        MLFLOW_ENABLED = True
-        print("⚠ Using local MLflow")
-except Exception as e:
-    print(f"⚠ MLflow not available: {e}")
-    MLFLOW_ENABLED = False
+            print("⚠️ Using local MLflow")
+            return False
+            
+    except Exception as e:
+        print(f"⚠️ MLflow initialization failed: {e}")
+        MLFLOW_ENABLED = False
+        return False
+
+# Initialize on startup
+mlflow_connected = initialize_mlflow()
 
 # Pydantic Models
 class PredictionRequest(BaseModel):
     model_id: str
-    batch_size: Optional[int] = 100  # Process in batches
+    batch_size: Optional[int] = 100
 
 class PredictionResponse(BaseModel):
     job_id: str
@@ -98,8 +131,8 @@ class PredictionResponse(BaseModel):
 
 class JobStatusResponse(BaseModel):
     job_id: str
-    status: str  # pending, processing, completed, failed
-    progress: float  # 0-100
+    status: str
+    progress: float
     total_predictions: Optional[int] = None
     processed_predictions: Optional[int] = None
     avg_trust_score: Optional[float] = None
@@ -109,6 +142,7 @@ class JobStatusResponse(BaseModel):
     explanation: Optional[str] = None
     timestamp: Optional[str] = None
     error: Optional[str] = None
+    mlflow_logged: Optional[bool] = None  # Track if MLflow logging succeeded
 
 class UploadResponse(BaseModel):
     model_id: str
@@ -116,12 +150,82 @@ class UploadResponse(BaseModel):
     supported_format: str
     data_samples: int
     features: List[str]
+    mlflow_logged: Optional[bool] = None
+
+
+def log_to_mlflow(operation: str, data: Dict[str, Any], model_id: str = None):
+    """
+    Centralized MLflow logging function with robust error handling
+    
+    Args:
+        operation: "upload" or "predict"
+        data: Dictionary of metrics/parameters to log
+        model_id: Optional model ID for run naming
+    
+    Returns:
+        bool: True if logging succeeded, False otherwise
+    """
+    if not MLFLOW_ENABLED:
+        print("⚠️ MLflow not enabled, skipping logging")
+        return False
+    
+    try:
+        import mlflow
+        
+        # Create run name
+        run_name = f"{operation}_{model_id[:8] if model_id else datetime.now().strftime('%H%M%S')}"
+        
+        # Set authentication again (in case it was reset)
+        if DAGSHUB_TOKEN:
+            os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USER
+            os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
+        
+        # Start MLflow run
+        with mlflow.start_run(run_name=run_name) as run:
+            # Log operation type
+            mlflow.log_param("operation", operation)
+            mlflow.log_param("timestamp", datetime.now().isoformat())
+            
+            if operation == "upload":
+                # Log upload-specific data
+                mlflow.log_param("model_id", data.get("model_id"))
+                mlflow.log_param("model_format", data.get("model_format"))
+                mlflow.log_param("data_samples", data.get("data_samples"))
+                mlflow.log_metric("upload_success", 1)
+                
+                if data.get("features"):
+                    mlflow.log_param("num_features", len(data["features"]))
+                    mlflow.log_param("features", ",".join(data["features"][:5]))  # First 5 features
+            
+            elif operation == "predict":
+                # Log prediction-specific data
+                mlflow.log_param("model_id", data.get("model_id"))
+                mlflow.log_metric("avg_trust_score", data.get("avg_trust_score", 0))
+                mlflow.log_metric("min_trust_score", data.get("min_trust_score", 0))
+                mlflow.log_metric("max_trust_score", data.get("max_trust_score", 0))
+                mlflow.log_metric("total_predictions", data.get("total_predictions", 0))
+                
+                # Log breakdown metrics
+                if data.get("trust_breakdown"):
+                    for metric, value in data["trust_breakdown"].items():
+                        mlflow.log_metric(f"trust_{metric}", value)
+                
+                mlflow.log_metric("prediction_success", 1)
+            
+            print(f"✅ MLflow logged: {operation} - Run ID: {run.info.run_id}")
+            return True
+            
+    except Exception as e:
+        print(f"⚠️ MLflow logging failed for {operation}: {e}")
+        print(f"📋 Traceback: {traceback.format_exc()}")
+        return False
 
 
 def process_predictions_batch(job_id: str, model_id: str, batch_size: int):
     """Background task to process predictions in batches"""
     
     job_file = os.path.join(JOBS_DIR, f"{job_id}.json")
+    mlflow_logged = False
     
     try:
         # Update status to processing
@@ -206,23 +310,27 @@ def process_predictions_batch(job_id: str, model_id: str, batch_size: int):
         else:
             explanation = "LOW TRUST (0-50): Do NOT rely on these predictions"
         
-        # MLflow logging (non-blocking)
-        if MLFLOW_ENABLED:
-            try:
-                import mlflow
-                with mlflow.start_run(run_name=f"predict_{model_id[:8]}"):
-                    mlflow.log_param("model_id", model_id)
-                    mlflow.log_metric("avg_trust_score", avg_trust_score)
-                    mlflow.log_metric("min_trust_score", min_trust_score)
-                    mlflow.log_metric("max_trust_score", max_trust_score)
-                    mlflow.log_metric("total_predictions", total_rows)
-                    for metric, value in trust_result["breakdown"].items():
-                        mlflow.log_metric(f"trust_{metric}", value)
-                    mlflow.log_metric("prediction_success", 1)
-            except Exception as e:
-                print(f"⚠ MLflow logging failed: {e}")
+        # MLflow logging (with retry)
+        print(f"📤 [Job {job_id}] Logging to MLflow/DagHub...")
+        mlflow_logged = log_to_mlflow(
+            operation="predict",
+            data={
+                "model_id": model_id,
+                "avg_trust_score": avg_trust_score,
+                "min_trust_score": min_trust_score,
+                "max_trust_score": max_trust_score,
+                "total_predictions": total_rows,
+                "trust_breakdown": trust_result["breakdown"]
+            },
+            model_id=model_id
+        )
         
-        # DVC tracking
+        if mlflow_logged:
+            print(f"✅ [Job {job_id}] MLflow logging successful")
+        else:
+            print(f"⚠️ [Job {job_id}] MLflow logging failed (results still saved)")
+        
+        # DVC tracking (non-blocking)
         try:
             log_to_dvc("predict", {
                 "model_id": model_id,
@@ -230,7 +338,7 @@ def process_predictions_batch(job_id: str, model_id: str, batch_size: int):
                 "total_predictions": total_rows
             })
         except Exception as e:
-            print(f"⚠ DVC tracking failed: {e}")
+            print(f"⚠️ DVC tracking failed: {e}")
         
         # Update job as completed
         job_data["status"] = "completed"
@@ -244,6 +352,7 @@ def process_predictions_batch(job_id: str, model_id: str, batch_size: int):
         job_data["explanation"] = explanation
         job_data["timestamp"] = datetime.now().isoformat()
         job_data["completed_at"] = datetime.now().isoformat()
+        job_data["mlflow_logged"] = mlflow_logged
         
         with open(job_file, "w") as f:
             json.dump(job_data, f, indent=2)
@@ -260,7 +369,8 @@ def process_predictions_batch(job_id: str, model_id: str, batch_size: int):
             "job_id": job_id,
             "status": "failed",
             "error": error_msg,
-            "failed_at": datetime.now().isoformat()
+            "failed_at": datetime.now().isoformat(),
+            "mlflow_logged": False
         }
         with open(job_file, "w") as f:
             json.dump(job_data, f, indent=2)
@@ -272,16 +382,18 @@ async def root():
     return {
         "message": "ML Trust Score System API",
         "status": "running",
-        "dagshub_connected": bool(DAGSHUB_TOKEN),
+        "dagshub_repo": DAGSHUB_REPO,
+        "dagshub_connected": mlflow_connected,
         "mlflow_enabled": MLFLOW_ENABLED,
-        "version": "2.0.0",
-        "features": ["batch_processing", "async_predictions", "progress_tracking"],
+        "version": "2.1.0",
+        "features": ["batch_processing", "async_predictions", "progress_tracking", "dagshub_tracking"],
         "endpoints": {
             "POST /upload": "Upload model + data",
             "POST /predict": "Start prediction job (async)",
             "GET /job/{job_id}": "Check prediction job status",
             "GET /models": "List all uploaded models",
-            "GET /health": "Health check"
+            "GET /health": "Health check",
+            "GET /mlflow-status": "Check MLflow connection"
         }
     }
 
@@ -292,7 +404,21 @@ async def health():
     return {
         "status": "healthy",
         "mlflow_enabled": MLFLOW_ENABLED,
+        "dagshub_connected": mlflow_connected,
         "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/mlflow-status")
+async def mlflow_status():
+    """Check MLflow/DagHub connection status"""
+    return {
+        "mlflow_enabled": MLFLOW_ENABLED,
+        "dagshub_connected": mlflow_connected,
+        "dagshub_repo": DAGSHUB_REPO,
+        "tracking_uri": os.getenv("MLFLOW_TRACKING_URI", "Not set"),
+        "has_token": bool(DAGSHUB_TOKEN),
+        "has_user": bool(DAGSHUB_USER)
     }
 
 
@@ -303,25 +429,11 @@ async def upload_model(
 ):
     """
     Upload model + data with automatic metadata extraction
-    
-    Args:
-        model_file: Model file (.pkl, .pt, .h5)
-        data_file: Training data CSV
-    
-    Returns:
-        Upload confirmation with model_id
     """
     
-    print(f"📄 Upload request received - Model: {model_file.filename}, Data: {data_file.filename}")
+    print(f"📁 Upload request received - Model: {model_file.filename}, Data: {data_file.filename}")
     
-    # Start MLflow run only if enabled
-    mlflow_run = None
-    if MLFLOW_ENABLED:
-        try:
-            import mlflow
-            mlflow_run = mlflow.start_run(run_name=f"upload_{datetime.now().strftime('%H%M%S')}")
-        except Exception as e:
-            print(f"⚠ MLflow run failed to start: {e}")
+    mlflow_logged = False
     
     try:
         # Validate model
@@ -372,25 +484,30 @@ async def upload_model(
             json.dump(metadata, f, indent=2)
         print(f"✓ Metadata saved: {metadata_path}")
         
-        # MLflow logging (non-blocking)
-        if MLFLOW_ENABLED and mlflow_run:
-            try:
-                import mlflow
-                mlflow.log_param("model_id", model_id)
-                mlflow.log_param("model_format", model_format)
-                mlflow.log_param("data_samples", data_samples)
-                mlflow.log_artifact(metadata_path)
-                mlflow.log_metric("upload_success", 1)
-                print("✓ MLflow logging completed")
-            except Exception as e:
-                print(f"⚠ MLflow logging failed (non-critical): {e}")
+        # MLflow logging
+        print(f"📤 Logging upload to MLflow/DagHub...")
+        mlflow_logged = log_to_mlflow(
+            operation="upload",
+            data={
+                "model_id": model_id,
+                "model_format": model_format,
+                "data_samples": data_samples,
+                "features": feature_order
+            },
+            model_id=model_id
+        )
+        
+        if mlflow_logged:
+            print("✅ MLflow logging completed")
+        else:
+            print("⚠️ MLflow logging failed (upload still successful)")
         
         # DVC tracking (non-blocking)
         try:
             log_to_dvc("upload", {"model_id": model_id, "samples": data_samples})
             print("✓ DVC tracking completed")
         except Exception as e:
-            print(f"⚠ DVC tracking failed (non-critical): {e}")
+            print(f"⚠️ DVC tracking failed (non-critical): {e}")
         
         print(f"✅ Upload completed successfully: {model_id}")
         
@@ -399,7 +516,8 @@ async def upload_model(
             message="Model uploaded successfully",
             supported_format=model_format,
             data_samples=data_samples,
-            features=feature_order
+            features=feature_order,
+            mlflow_logged=mlflow_logged
         )
         
     except HTTPException:
@@ -408,37 +526,16 @@ async def upload_model(
         error_msg = f"Upload failed: {str(e)}"
         print(f"❌ {error_msg}")
         print(traceback.format_exc())
-        
-        if MLFLOW_ENABLED and mlflow_run:
-            try:
-                import mlflow
-                mlflow.log_metric("upload_success", 0)
-            except:
-                pass
-        
         raise HTTPException(status_code=500, detail=error_msg)
-    finally:
-        if MLFLOW_ENABLED and mlflow_run:
-            try:
-                import mlflow
-                mlflow.end_run()
-            except:
-                pass
 
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(request: PredictionRequest, background_tasks: BackgroundTasks):
     """
     Start async prediction job for all data rows
-    
-    Args:
-        request: Model ID and batch size
-    
-    Returns:
-        Job ID for tracking progress
     """
     
-    print(f"📄 Prediction request for model: {request.model_id}")
+    print(f"📊 Prediction request for model: {request.model_id}")
     
     try:
         # Verify model exists
@@ -485,15 +582,7 @@ async def predict(request: PredictionRequest, background_tasks: BackgroundTasks)
 
 @app.get("/job/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
-    """
-    Get status of a prediction job
-    
-    Args:
-        job_id: Job ID from /predict endpoint
-    
-    Returns:
-        Current job status and results
-    """
+    """Get status of a prediction job"""
     
     job_file = os.path.join(JOBS_DIR, f"{job_id}.json")
     
