@@ -29,7 +29,7 @@ pip install -r requirements.txt
 ### 2. Setup Environment
 Create `.env` file:
 ```bash
-DAGSHUB_REPO=your-username/ml-trust-score
+DAGSHUB_REPO=garvitwork/ml-trust-score
 DAGSHUB_TOKEN=your-dagshub-token
 ```
 
