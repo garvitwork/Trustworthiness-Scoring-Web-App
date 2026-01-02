@@ -29,10 +29,13 @@ from functions import (
 
 load_dotenv()
 
-# Set DagHub authentication BEFORE any DagHub imports
+# Get DagHub config FIRST
 DAGSHUB_TOKEN = os.getenv("DAGSHUB_TOKEN", "f43d18eaef53b8269dd37f6434a8612b4faa6c8b")
 DAGSHUB_USER = os.getenv("DAGSHUB_USER", "garvitwork")
-if DAGSHUB_TOKEN:
+DAGSHUB_REPO = os.getenv("DAGSHUB_REPO", "garvitwork/ml-trust-score")
+
+# Set authentication environment variables
+if DAGSHUB_TOKEN and DAGSHUB_USER:
     os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USER
     os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
 
@@ -59,8 +62,6 @@ for d in [MODEL_DIR, DATA_DIR, METADATA_DIR, JOBS_DIR]:
 # Job storage for async processing
 prediction_jobs = {}
 
-# Get DagHub config
-DAGSHUB_REPO = os.getenv("DAGSHUB_REPO", "garvitwork/ml-trust-score")
 MLFLOW_ENABLED = False
 
 def initialize_mlflow():
@@ -71,24 +72,30 @@ def initialize_mlflow():
         import mlflow
         import dagshub
         
-        if DAGSHUB_TOKEN:
+        if DAGSHUB_TOKEN and DAGSHUB_USER:
             try:
-                # Initialize DagHub
+                # Set environment variables for MLflow authentication
+                os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USER
+                os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
+                
+                # Initialize DagHub connection with token
+                dagshub.auth.add_app_token(token=DAGSHUB_TOKEN)
                 dagshub.init(
                     repo_owner=DAGSHUB_REPO.split('/')[0],
                     repo_name=DAGSHUB_REPO.split('/')[1],
                     mlflow=True
                 )
                 
-                # Set tracking URI with authentication
+                # Set tracking URI WITHOUT credentials in URL
                 tracking_uri = f"https://dagshub.com/{DAGSHUB_REPO}.mlflow"
                 mlflow.set_tracking_uri(tracking_uri)
                 mlflow.set_experiment("ml-trust-score")
                 
-                # Test connection with a dummy run
+                # Test connection
                 with mlflow.start_run(run_name="connection_test") as run:
                     mlflow.log_param("test", "connection")
                     mlflow.log_metric("status", 1)
+                    mlflow.end_run()
                 
                 MLFLOW_ENABLED = True
                 print(f"✅ DagHub connected: {DAGSHUB_REPO}")
@@ -97,7 +104,7 @@ def initialize_mlflow():
                 
             except Exception as e:
                 print(f"⚠️ DagHub connection failed: {e}")
-                print(f"📋 Traceback: {traceback.format_exc()}")
+                print(f"📋 Error details: {traceback.format_exc()}")
                 
                 # Fallback to local MLflow
                 mlflow.set_tracking_uri("file://./mlruns")
@@ -105,7 +112,7 @@ def initialize_mlflow():
                 print("⚠️ Using local MLflow as fallback")
                 return False
         else:
-            print("⚠️ DAGSHUB_TOKEN not found in environment")
+            print(f"⚠️ Missing credentials - Token: {bool(DAGSHUB_TOKEN)}, User: {bool(DAGSHUB_USER)}")
             mlflow.set_tracking_uri("file://./mlruns")
             MLFLOW_ENABLED = True
             print("⚠️ Using local MLflow")
@@ -143,7 +150,7 @@ class JobStatusResponse(BaseModel):
     explanation: Optional[str] = None
     timestamp: Optional[str] = None
     error: Optional[str] = None
-    mlflow_logged: Optional[bool] = None  # Track if MLflow logging succeeded
+    mlflow_logged: Optional[bool] = None
 
 class UploadResponse(BaseModel):
     model_id: str
@@ -191,7 +198,7 @@ def log_to_mlflow(operation: str, data: Dict[str, Any], model_id: str = None):
                 
                 if data.get("features"):
                     mlflow.log_param("num_features", len(data["features"]))
-                    mlflow.log_param("features", ",".join(data["features"][:5]))  # First 5 features
+                    mlflow.log_param("features", ",".join(data["features"][:5]))
             
             elif operation == "predict":
                 # Log prediction-specific data
@@ -208,6 +215,7 @@ def log_to_mlflow(operation: str, data: Dict[str, Any], model_id: str = None):
                 
                 mlflow.log_metric("prediction_success", 1)
             
+            mlflow.end_run()
             print(f"✅ MLflow logged: {operation} - Run ID: {run.info.run_id}")
             return True
             
@@ -306,7 +314,7 @@ def process_predictions_batch(job_id: str, model_id: str, batch_size: int):
         else:
             explanation = "LOW TRUST (0-50): Do NOT rely on these predictions"
         
-        # MLflow logging (with retry)
+        # MLflow logging
         print(f"📤 [Job {job_id}] Logging to MLflow/DagHub...")
         mlflow_logged = log_to_mlflow(
             operation="predict",
@@ -427,7 +435,7 @@ async def upload_model(
     Upload model + data with automatic metadata extraction
     """
     
-    print(f"📁 Upload request received - Model: {model_file.filename}, Data: {data_file.filename}")
+    print(f"📥 Upload request received - Model: {model_file.filename}, Data: {data_file.filename}")
     
     mlflow_logged = False
     
