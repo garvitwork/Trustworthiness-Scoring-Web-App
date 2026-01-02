@@ -29,6 +29,13 @@ from functions import (
 
 load_dotenv()
 
+# Set DagHub authentication BEFORE any DagHub imports
+DAGSHUB_TOKEN = os.getenv("DAGSHUB_TOKEN", "f43d18eaef53b8269dd37f6434a8612b4faa6c8b")
+DAGSHUB_USER = os.getenv("DAGSHUB_USER", "garvitwork")
+if DAGSHUB_TOKEN:
+    os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USER
+    os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
+
 app = FastAPI(title="ML Trust Score API", version="1.0.0")
 
 app.add_middleware(
@@ -52,10 +59,8 @@ for d in [MODEL_DIR, DATA_DIR, METADATA_DIR, JOBS_DIR]:
 # Job storage for async processing
 prediction_jobs = {}
 
-# Initialize MLflow with FIXED DagHub authentication
+# Get DagHub config
 DAGSHUB_REPO = os.getenv("DAGSHUB_REPO", "garvitwork/ml-trust-score")
-DAGSHUB_TOKEN = os.getenv("DAGSHUB_TOKEN", "f43d18eaef53b8269dd37f6434a8612b4faa6c8b")
-DAGSHUB_USER = os.getenv("DAGSHUB_USER", "garvitwork")  # Add this to Render env vars
 MLFLOW_ENABLED = False
 
 def initialize_mlflow():
@@ -68,10 +73,6 @@ def initialize_mlflow():
         
         if DAGSHUB_TOKEN:
             try:
-                # Set environment variables for authentication
-                os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USER
-                os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
-                
                 # Initialize DagHub
                 dagshub.init(
                     repo_owner=DAGSHUB_REPO.split('/')[0],
@@ -174,11 +175,6 @@ def log_to_mlflow(operation: str, data: Dict[str, Any], model_id: str = None):
         
         # Create run name
         run_name = f"{operation}_{model_id[:8] if model_id else datetime.now().strftime('%H%M%S')}"
-        
-        # Set authentication again (in case it was reset)
-        if DAGSHUB_TOKEN:
-            os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USER
-            os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
         
         # Start MLflow run
         with mlflow.start_run(run_name=run_name) as run:
