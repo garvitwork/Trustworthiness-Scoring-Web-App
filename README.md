@@ -370,6 +370,4 @@ DAGSHUB_TOKEN=your-token
 
 This is a prototype system. Improvements welcome!
 
-## 📄 License
 
-MIT License
